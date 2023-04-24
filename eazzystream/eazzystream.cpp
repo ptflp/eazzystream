@@ -16,156 +16,178 @@
 using namespace std;
 using namespace DirectX;
 
-void SaveBitmapToFile(BYTE* pBitmapBits, DXGI_OUTDUPL_DESC desc, LPCWSTR filePath);
+void CaptureScreen(ID3D11Device* device, ID3D11DeviceContext* deviceContext, IDXGIOutput1* output1);
+void SaveBitmapToFile(ID3D11Texture2D* texture, ID3D11DeviceContext* context, const wchar_t* filename);
 
-int main() {
-    HRESULT hr;
-
-    // Инициализация D3D11
-    D3D_FEATURE_LEVEL featureLevel;
-    ID3D11Device* device = nullptr;
-    ID3D11DeviceContext* context = nullptr;
-
-    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
-        D3D11_SDK_VERSION, &device, &featureLevel, &context);
-    if (FAILED(hr)) {
-        cerr << "Ошибка при создании устройства D3D11." << endl;
+int main()
+{
+    // Инициализация COM
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(hr))
+    {
+        std::cerr << "Failed to initialize COM." << std::endl;
         return -1;
     }
+    std::cout << "Init complete" << std::endl;
 
-    // Получение DXGI адаптера и фабрики
-    IDXGIAdapter* adapter = nullptr;
-    IDXGIFactory* factory = nullptr;
+    // Создание устройства и контекста
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* deviceContext = nullptr;
+    hr = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+        nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &deviceContext);
+
+    if (FAILED(hr))
     {
-        IDXGIDevice1* dxgiDevice = nullptr;
-        hr = device->QueryInterface(__uuidof(IDXGIDevice1), reinterpret_cast<void**>(&dxgiDevice));
-        if (SUCCEEDED(hr)) {
+        std::cerr << "Failed to create D3D11 device and context." << std::endl;
+        CoUninitialize();
+        return -1;
+    }
+    std::cout << "device creation complete" << std::endl;
+
+    std::cout << "acquiring device and output" << std::endl;
+    // Получение адаптера и выхода
+    IDXGIOutput1* output1 = nullptr;
+    {
+        IDXGIDevice* dxgiDevice = nullptr;
+        hr = device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice));
+        if (SUCCEEDED(hr))
+        {
+            std::cout << "dxgiDevice acquired" << std::endl;
+            IDXGIAdapter* adapter = nullptr;
             hr = dxgiDevice->GetAdapter(&adapter);
-            if (SUCCEEDED(hr)) {
-                hr = adapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(&factory));
+            if (SUCCEEDED(hr))
+            {
+                std::cout << "IDXGIAdapter acquired" << std::endl;
+                IDXGIOutput* output = nullptr;
+                hr = adapter->EnumOutputs(0, &output);
+                if (SUCCEEDED(hr))
+                {
+                    std::cout << "IDXGIOutput acquired" << std::endl;
+                    hr = output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1));
+                    output->Release();
+                }
+                adapter->Release();
             }
             dxgiDevice->Release();
         }
     }
 
-    if (FAILED(hr)) {
-        cerr << "Не удалось получить DXGI адаптер и фабрику." << endl;
-        return -1;
-    }
-
-    // Получение вывода и создание OutputDuplication
-    IDXGIOutput1* output = nullptr;
-    IDXGIOutputDuplication* outputDuplication = nullptr;
+    if (output1)
     {
-        IDXGIOutput* tempOutput = nullptr;
-        hr = adapter->EnumOutputs(0, &tempOutput);
-        if (SUCCEEDED(hr)) {
-            hr = tempOutput->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output));
-            if (SUCCEEDED(hr)) {
-                hr = output->DuplicateOutput(device, &outputDuplication);
-            }
-            tempOutput->Release();
-        }
+        // Захват экрана
+        CaptureScreen(device, deviceContext, output1);
+
+        // Освобождение ресурсов
+        output1->Release();
+    }
+    else
+    {
+        std::cerr << "Failed to get DXGI output." << std::endl;
     }
 
-    if (FAILED(hr)) {
-        cerr << "Не удалось получить вывод и создать OutputDuplication." << endl;
-        return -1;
-    }
-
-    // Захват изображения
-    DXGI_OUTDUPL_DESC outputDuplDesc;
-    outputDuplication->GetDesc(&outputDuplDesc);
-    DXGI_OUTDUPL_FRAME_INFO frameInfo;
-    IDXGIResource* desktopResource = nullptr;
-    ID3D11Texture2D* acquiredDesktopImage = nullptr;
-    ID3D11Texture2D* destImage = nullptr;
-
-    hr = outputDuplication->AcquireNextFrame(INFINITE, &frameInfo, &desktopResource);
-    if (SUCCEEDED(hr)) {
-        hr = desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&acquiredDesktopImage));
-        if (SUCCEEDED(hr)) {
-            D3D11_TEXTURE2D_DESC textureDesc;
-            acquiredDesktopImage->GetDesc(&textureDesc);
-            textureDesc.Usage = D3D11_USAGE_STAGING;
-            textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            textureDesc.BindFlags = 0;
-            textureDesc.MiscFlags = 0;
-
-            hr = device->CreateTexture2D(&textureDesc, nullptr, &destImage);
-            if (SUCCEEDED(hr)) {
-                context->CopyResource(destImage, acquiredDesktopImage);
-            }
-        }
-    }
-
-    if (FAILED(hr)) {
-        cerr << "Не удалось захватить изображение с экрана." << endl;
-        return -1;
-    }
-
-    // Получение содержимого изображения
-    D3D11_MAPPED_SUBRESOURCE mappedResource;
-    hr = context->Map(destImage, 0, D3D11_MAP_READ, 0, &mappedResource);
-    if (FAILED(hr)) {
-        cerr << "Не удалось получить содержимое изображения." << endl;
-        return -1;
-    }
-
-    // Сохранение изображения в файл
-    SaveBitmapToFile(static_cast<BYTE*>(mappedResource.pData), outputDuplDesc, L"CapturedImage.bmp");
-
-    // Освобождение ресурсов
-    context->Unmap(destImage, 0);
-    desktopResource->Release();
-    acquiredDesktopImage->Release();
-    destImage->Release();
-    outputDuplication->Release();
-    output->Release();
-    factory->Release();
-    adapter->Release();
-    context->Release();
+    // Очистка
+    deviceContext->Release();
     device->Release();
-
-    wcout << "file saved to CapturedImage.bmp." << endl;
+    CoUninitialize();
 
     return 0;
 }
 
-void SaveBitmapToFile(BYTE* pBitmapBits, DXGI_OUTDUPL_DESC desc, LPCWSTR filePath) {
-    BITMAPFILEHEADER fileHeader = { 0 };
-    fileHeader.bfType = 0x4D42; // "BM"
-    fileHeader.bfSize = static_cast<DWORD>(sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + desc.ModeDesc.Height * desc.ModeDesc.Width * 4);
-    fileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+void CaptureScreen(ID3D11Device* device, ID3D11DeviceContext* deviceContext, IDXGIOutput1* output1)
+{
+    DXGI_OUTPUT_DESC outputDesc;
+    output1->GetDesc(&outputDesc);
 
-    BITMAPINFOHEADER infoHeader = { 0 };
-    infoHeader.biSize = sizeof(BITMAPINFOHEADER);
-    infoHeader.biWidth = desc.ModeDesc.Width;
-    infoHeader.biHeight = -(static_cast<LONG>(desc.ModeDesc.Height));
-    infoHeader.biPlanes = 1;
-    infoHeader.biBitCount = 32;
-    infoHeader.biCompression = BI_RGB;
-    infoHeader.biSizeImage = desc.ModeDesc.Height * desc.ModeDesc.Width * 4;
-    infoHeader.biXPelsPerMeter = 0;
-    infoHeader.biYPelsPerMeter = 0;
-    infoHeader.biClrUsed = 0;
-    infoHeader.biClrImportant = 0;
+    // Создаем DXGIOutputDuplication
+    IDXGIOutputDuplication* outputDupl;
+    HRESULT hr = output1->DuplicateOutput(device, &outputDupl);
 
-    // Открытие файла и запись заголовков
-    ofstream outFile(filePath, ios::binary);
-    if (outFile) {
-        outFile.write(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
-        outFile.write(reinterpret_cast<char*>(&infoHeader), sizeof(infoHeader));
+    DXGI_OUTDUPL_FRAME_INFO frameInfo;
+    IDXGIResource* acquiredDesktopImage;
+    hr = outputDupl->AcquireNextFrame(0, &frameInfo, &acquiredDesktopImage);
 
-        // Запись данных изображения
-        for (UINT row = 0; row < desc.ModeDesc.Height; ++row) {
-            outFile.write(reinterpret_cast<char*>(pBitmapBits + row * desc.ModeDesc.Width * 4), desc.ModeDesc.Width * 4);
-        }
+    if (SUCCEEDED(hr))
+    {
+        ID3D11Texture2D* desktopImage;
+        hr = acquiredDesktopImage->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&desktopImage));
 
-        outFile.close();
-    }
-    else {
-        cerr << "Не удалось сохранить изображение в файл." << endl;
+        // Создаем текстуру с форматом DXGI_FORMAT_B8G8R8A8_UNORM
+        D3D11_TEXTURE2D_DESC desc;
+        desktopImage->GetDesc(&desc);
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        desc.BindFlags = 0;
+        desc.MiscFlags = 0;
+
+        ID3D11Texture2D* newTexture;
+        device->CreateTexture2D(&desc, nullptr, &newTexture);
+
+        // Копируем данные изображения в новую текстуру
+        deviceContext->CopyResource(newTexture, desktopImage);
+
+        // Сохраняем текстуру в файл
+        const wchar_t* filename = L"CapturedImage.bmp";
+        SaveBitmapToFile(newTexture, deviceContext, filename);
+
+        // Освобождаем ресурсы
+        newTexture->Release();
+        desktopImage->Release();
+        acquiredDesktopImage->Release();
+        outputDupl->ReleaseFrame();
     }
 }
 
+void SaveBitmapToFile(ID3D11Texture2D* texture, ID3D11DeviceContext* context, const wchar_t* filename)
+{
+    // Получаем описание текстуры
+    D3D11_TEXTURE2D_DESC desc;
+    texture->GetDesc(&desc);
+
+    // Создаем буфер для данных пикселей
+    UINT rowPitch = desc.Width * 4; // 4 байта на пиксель (B8G8R8A8)
+    UINT imageSize = rowPitch * desc.Height;
+    BYTE* imageData = new BYTE[imageSize];
+
+    // Копируем данные из текстуры в буфер
+    D3D11_MAPPED_SUBRESOURCE mappedResource;
+    context->Map(texture, 0, D3D11_MAP_READ, 0, &mappedResource);
+    memcpy(imageData, mappedResource.pData, imageSize);
+    context->Unmap(texture, 0);
+
+    // Инициализация Windows Imaging Component (WIC)
+    IWICImagingFactory* wicFactory;
+    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFactory));
+
+    // Создаем WIC Bitmap
+    IWICBitmap* wicBitmap;
+    wicFactory->CreateBitmapFromMemory(desc.Width, desc.Height, GUID_WICPixelFormat32bppBGRA, rowPitch, imageSize, imageData, &wicBitmap);
+
+    // Создаем файл с указанным именем файла
+    IWICStream* wicStream;
+    wicFactory->CreateStream(&wicStream);
+    wicStream->InitializeFromFilename(filename, GENERIC_WRITE);
+
+    // Создаем BMP энкодер
+    IWICBitmapEncoder* wicEncoder;
+    wicFactory->CreateEncoder(GUID_ContainerFormatBmp, nullptr, &wicEncoder);
+    wicEncoder->Initialize(wicStream, WICBitmapEncoderNoCache);
+
+    // Создаем BMP фрейм и сохраняем изображение
+    IWICBitmapFrameEncode* wicFrame;
+    wicEncoder->CreateNewFrame(&wicFrame, nullptr);
+    wicFrame->Initialize(nullptr);
+    wicFrame->WriteSource(wicBitmap, nullptr);
+    wicFrame->Commit();
+    wicEncoder->Commit();
+
+    // Очищаем ресурсы
+    delete[] imageData;
+    wicFrame->Release();
+    wicEncoder->Release();
+    wicStream->Release();
+    wicBitmap->Release();
+    wicFactory->Release();
+}
